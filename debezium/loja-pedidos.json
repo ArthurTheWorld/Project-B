@@ -1,0 +1,18 @@
+{
+  "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+  "tasks.max": "1",
+  "database.hostname": "postgres",
+  "database.port": "5432",
+  "database.user": "loja",
+  "database.password": "loja",
+  "database.dbname": "loja",
+  "topic.prefix": "loja",
+  "table.include.list": "loja.pedidos",
+  "plugin.name": "pgoutput",
+  "slot.name": "loja_slot",
+  "publication.name": "loja_pub",
+  "publication.autocreate.mode": "filtered",
+  "tombstones.on.delete": "false",
+  "decimal.handling.mode": "double",
+  "schema.refresh.mode": "columns_diff"
+}

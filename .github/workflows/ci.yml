@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Sintaxe Python
+        run: python -m compileall -q generator spark tests
+
+      - name: Instalar pytest
+        run: pip install pytest
+
+      - name: Rodar testes
+        run: pytest -q
+
+      - name: Validar docker-compose
+        run: docker compose config --quiet

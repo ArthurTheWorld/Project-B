@@ -1,0 +1,171 @@
+name: cdc-lakehouse
+
+services:
+  # ==========================================================
+  # Fonte: banco transacional com WAL lógico habilitado
+  # ==========================================================
+  postgres:
+    image: postgres:16
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+    environment:
+      POSTGRES_USER: loja
+      POSTGRES_PASSWORD: loja
+      POSTGRES_DB: loja
+    ports:
+      - "5435:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U loja -d loja"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # ==========================================================
+  # Kafka em KRaft (sem Zookeeper)
+  # ==========================================================
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:29092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+
+  # ==========================================================
+  # Kafka Connect + Debezium (Postgres)
+  # ==========================================================
+  connect:
+    image: debezium/connect:3.0.0.Final
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:29092
+      GROUP_ID: cdc-connect
+      CONFIG_STORAGE_TOPIC: cdc_connect_configs
+      OFFSET_STORAGE_TOPIC: cdc_connect_offsets
+      STATUS_STORAGE_TOPIC: cdc_connect_status
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      LOG_LEVEL: INFO
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/ >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  # Registra o conector uma única vez e encerra
+  connector-init:
+    image: curlimages/curl:8.8.0
+    depends_on:
+      connect:
+        condition: service_healthy
+    volumes:
+      - ./debezium:/debezium:ro
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        echo "aguardando Kafka Connect..."
+        until curl -sf http://connect:8083/ >/dev/null; do sleep 2; done
+        echo "registrando conector..."
+        curl -sf -X PUT -H 'Content-Type: application/json' \
+          --data @/debezium/loja-pedidos.json \
+          http://connect:8083/connectors/loja-pedidos/config | head -c 400
+        echo ""
+        echo "conector registrado"
+    restart: "no"
+
+  # ==========================================================
+  # Gerador de carga: simula a operação do e-commerce
+  # ==========================================================
+  generator:
+    build:
+      context: ./generator
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: loja
+      PGUSER: loja
+      PGPASSWORD: loja
+      INTERVALO_MS: ${INTERVALO_MS:-400}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["python", "-m", "carga"]
+
+  # ==========================================================
+  # Consumo: Spark Structured Streaming -> Delta Lake
+  # ==========================================================
+  spark:
+    build:
+      context: ./spark
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+      TOPICO: loja.loja.pedidos
+      DELTA_PATH: /data/delta/pedidos
+      CHECKPOINT: /data/checkpoints/pedidos
+      STARTING_OFFSETS: earliest
+    volumes:
+      - delta:/data
+      - ivy:/root/.ivy2
+      - ./sql:/opt/sql:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command:
+      - /bin/bash
+      - -c
+      - |
+        /opt/spark/bin/spark-submit \
+          --master 'local[2]' \
+          --driver-memory 1g \
+          --packages io.delta:delta-spark_2.12:3.2.0,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1 \
+          --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension \
+          --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
+          --conf spark.databricks.delta.schema.autoMerge.enabled=true \
+          /opt/job.py
+
+volumes:
+  pgdata:
+  delta:
+  ivy:
