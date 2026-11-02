@@ -1,9 +1,9 @@
 # Projeto B – Confiabilidade de Dados (SLOs, Lineage e Incident Response)
 
-**Objetivo:** Transformar a afirmação “nossos pipelines são confiáveis” em evidência mensurável através de SLOs (Service Level Objectives), rastreamento de lineage completo e um processo de incident response com MT medido.
+**Objetivo:** Transformar a afirmação "nossos pipelines são confiáveis" em evidência mensurável através de SLOs (Objetivos de Nível de Serviço), rastreamento de lineage completo e um processo de incident response com MT medido.
 
 ## Por que este projeto?
-- O seu perfil menciona “pipelines confiáveis”, mas hoje isso é afirmação, não evidência.
+- O seu perfil menciona "pipelines confiáveis", mas hoje isso é afirmação, não evidência.
 - Este projeto transforma a frase em sistema e conversa com o que você já tem (stack CDC, dbt, Metabase).
 - Entregáveis de alto impacto para LinkedIn/portfólio: MTTR reduzido, % de incidentes detectados antes do stakeholder, catálogo de SLOs versionado.
 
@@ -26,7 +26,7 @@
 - Os resultados alimentam os SLOs e aparecem no painel de saúde.
 
 ### 4. Painel de saúde da plataforma (Metabase / Grafana)
-- Exibir status “✅/❌” por SLO.
+- Exibir status "✅/❌" por SLO.
 - Mostrar tendência de falhas nos últimos 7 dias.
 - Links rápidos para runbooks.
 
@@ -78,8 +78,8 @@ project-b/
 2. **Criar `slo_catalog.yaml`** – modelo inicial com as colunas: `table_name`, `freshness_target`, `volume_target`, `schema_target`, `distribution_target`.
 3. **Integrar OpenLineage** ao job Spark existente (`spark/job.py`) – adicionar o hook `openlineage.spark` e garantir que os eventos sejam emitidos.
 4. **Criar primeira expectation** com Great Expectations – ex.: `expect_column_values_to_be_between` para `preço` no `stg_coingecko__mercado`.
-5. **Construir painel inicial** no Metabase – uma página “Saúde da Plataforma” com indicadores de frescor e volume.
+5. **Construir painel inicial** no Metabase – uma página "Saúde da Plataforma" com indicadores de frescor e volume.
 
 ---
 
-*Este projeto fechará a maior lacuna do seu perfil (“Confiabilidade (SLO de dados, lineage, incidente, MTTR)”) e trará números concretos para seu portfólio e LinkedIn.*
+*Este projeto fechará a maior lacuna do seu perfil ("Confiabilidade (SLO de dados, lineage, incidente, MTTR)") e trará números concretos para seu portfólio e LinkedIn.*
