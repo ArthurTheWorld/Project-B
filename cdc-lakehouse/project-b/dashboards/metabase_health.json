@@ -1,0 +1,47 @@
+{
+  "dashboard": "Saúde da Plataforma - Projeto B",
+  "description": "Painel Metabase com indicadores de SLOs, lineage e status de incidentes",
+  "version": "1.0",
+  "tiles": [
+    {
+      "type": "query",
+      "title": "Freshor Status por Tabela",
+      "query": "SELECT table_name, freshness_target_max_age_minutes as max_age_min, COUNT(*) as breach_count, CASE WHEN COUNT(*) = 0 THEN '✅' ELSE '❌' END as status FROM slo_catalog_view GROUP BY table_name, freshness_target_max_age_minutes",
+      "description": "Indica se cada tabela está dentro do target de frescor (>95% dados com menos de 1h)"
+    },
+    {
+      "type": "query",
+      "title": "Volume por Lote",
+      "query": "SELECT table_name, min_rows_per_batch as min_expected, COUNT(*) as actual_rows, CASE WHEN COUNT(*) >= min_rows_per_batch THEN '✅' ELSE '❌' END as status FROM batch_metrics GROUP BY table_name, min_rows_per_batch",
+      "description": "Verifica se o volume por batch está acima do mínimo esperado"
+    },
+    {
+      "type": "query",
+      "title": "Expectations Suites Status",
+      "query": "SELECT table_name, suite_name, failed_expectations, total_expectations, CASE WHEN failed_expectations = 0 THEN '✅' ELSE '❌' END as status FROM expectation_results ORDER BY table_name, suite_name",
+      "description": "Status das suites Great Expectations para cada tabela"
+    },
+    {
+      "type": "query",
+      "title": "Incidentes Recentes",
+      "query": "SELECT incident_type, detected_at, resolved_at, (resolved_at - detected_at) as mttr_minutes, status FROM incident_log ORDER BY detected_at DESC LIMIT 10",
+      "description": "Últimos incidentes simulados com tempo de resolução (MTTR)"
+    },
+    {
+      "type": "query",
+      "title": "Lineage View",
+      "query": "SELECT source, bronze, silver, gold FROM openlineage_events WHERE run_id = current_run() ORDER BY event_timestamp",
+      "description": "Visualização completa de lineage OpenLineage da origem ao Gold"
+    }
+  ],
+  "filters": [
+    {"name": "time_range", "type": "time", "default": "7d"},
+    {"name": "table_filter", "type": "multi-select", "placeholder": "Selecione tabelas"}
+  ],
+  "links": [
+    {"label": "Catálogo SLOs", "url": "/project-b/slo_catalog.yaml"},
+    {"label": "Runbooks", "url": "/project-b/runbooks/"},
+    {"label": "Expectations", "url": "/project-b/expectations/"},
+    {"label": "Incident Simulation", "url": "/project-b/scripts/"}
+  ]
+}

@@ -47,7 +47,19 @@
 - **% de incidentes detectados antes do stakeholder** (ex.: 90 %).
 - Link para o painel e para o catálogo de SLOs.
 
-### 8. Estrutura de pastas (planejada)
+### 8. Incidentes simulados e MTTR
+- Disparar artificialmente uma falha (ex.: pausar Spark, injetar dados extras, alterar schema) e medir:
+  - **Tempo de detecção** (quanto tempo até o painel sinalizar / tracker registrar).
+  - **Tempo de resolução** (MTTR via `scripts/mttr_tracker.py`).
+- Registrar resultados no `mttr_log.json` e no `READMEfinal.md`.
+- Scripts auxiliares: `simular_latencia_alta.py`, `simular_volume_inesperado.py`, `simular_schema_change.py`.
+
+### 9. Decisão final: próximo foco
+Após a coleta de métricas de incidentes e MTTR, decidir:
+- **Iterar Project A** (CDC platform) – aprimorar Debezium, Spark job, escalabilidade.
+- **Explorar outro tópico** de engenharia de dados (ex.: streaming com Flink, data warehouse otimizado, governance automatizada).
+
+### 10. Estrutura de pastas (planejada)
 
 ```
 project-b/
