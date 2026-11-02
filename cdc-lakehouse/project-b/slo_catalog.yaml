@@ -1,0 +1,33 @@
+slo_catalog.yaml
+version: 1.0
+tables:
+  - name: loja.pedidos
+    freshness_target:
+      max_age_minutes: 60
+      # >95% dos dados com menos de 1h
+    volume_target:
+      min_rows_per_batch: 100
+      # Esperado mínimo de linhas por lote Spark
+    schema_target:
+      allow_add_column: false
+      # Mudanças de schema exigem nova versão do catálogo
+    distribution_target:
+      status_distribution:
+        pending: 30
+        processing: 50
+        completed: 20
+        # Percentual aproximado de pedidos por status
+  - name: stg_coingecko__mercado
+    freshness_target:
+      max_age_minutes: 120
+      # Dados a cada 2h são aceitáveis para séries temporais
+    volume_target:
+      min_rows_per_batch: 50
+    schema_target:
+      allow_add_column: true
+      # Permitir nova coluna via auto‑merge do Delta
+    distribution_target:
+      price_range:
+        min: 0
+        max: 1000
+        # Intervalo de preço esperado (USD)

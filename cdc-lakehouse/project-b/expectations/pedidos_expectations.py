@@ -1,0 +1,116 @@
+# Great Expectations Suite for Projeto B
+
+This suite validates the key data quality indicators that feed the SLOs defined in `slo_catalog.yaml`.
+
+## Expectations definitions
+
+### expectations/pedidos_expectations.py
+```python
+import great_expectations as gx
+from great_expectations.core import ExpectationSuite
+from great_expectations.dataset import PandasDataset
+
+def create_pedidos_suite():
+    suite = ExpectationSuite(name="pedidos_expectations")
+
+    # 1. Nenhum valor nulo na chave primária
+    suite.add_expectation(
+        gx.expectation.expect_column_values_to_not_be_null(
+            column="pedido_id"
+        )
+    )
+
+    # 2. Preço deve estar dentro de um range razonável (0 a 1000 USD)
+    suite.add_expectation(
+        gx.expectation.expect_column_values_to_be_between(
+            column="preço",
+            min_value=0,
+            max_value=1000
+        )
+    )
+
+    # 3. Quantidade deve ser maior que zero
+    suite.add_expectation(
+        gx.expectation.expect_column_values_to_be_between(
+            column="quantidade",
+            min_value=0.01,
+            max_value=None
+        )
+    )
+
+    # 4. Data de ingestão não pode ser do futuro
+    suite.add_expectation(
+        gx.expectation.expect_column_values_to_not_be_greater_than(
+            column="ingested_at",
+            value="2025-12-31T23:59:59Z"
+        )
+    )
+
+    # 5. Status must be one of the allowed values
+    suite.add_expectation(
+        gx.expectation.expect_column_values_to_be_in_set(
+            column="status",
+            value_set=["pending", "processing", "completed", "cancelled"]
+        )
+    )
+
+    return suite
+```
+
+### expectations/mercado_expectations.py
+```python
+import great_expectations as gx
+from great_expectations.core import ExpectationSuite
+
+def create_mercado_suite():
+    suite = ExpectationSuite(name="mercado_expectations")
+
+    # 1. Preço deve ser positivo
+    suite.add_expectation(
+        gx.expectation.expect_column_values_to_be_between(
+            column="preço",
+            min_value=0.01,
+            max_value=None
+        )
+    )
+
+    # 2. Volume negociado deve ser não-negativo
+    suite.add_expectation(
+        gx.expectation.expect_column_values_to_be_between(
+            column="volume",
+            min_value=0,
+            max_value=None
+        )
+    )
+
+    # 3. Moeda must be a known ISO code (ex.: BTC, ETH, DOGE)
+    suite.add_expectation(
+        gx.expectation.expect_column_values_to_be_in_set(
+            column="moeda",
+            value_set=["BTC", "ETH", "DOGE", "BNB", "ADA"]
+        )
+    )
+
+    # 4. Timestamp dentro de janela esperada (ultimas 2h)
+    suite.add_expectation(
+        gx.expectation.expect_column_values_to_not_be_greater_than(
+            column="timestamp",
+            value="2025-12-31T23:59:59Z"
+        )
+    )
+
+    return suite
+```
+
+## Como usar
+
+```bash
+# No ambiente Spark/Databricks
+python -m great_expectations suite validate expectations/pedidos_expectations.py
+python -m great_expectations suite validate expectations/mercado_expectations.py
+```
+
+## Integração com SLOs
+
+- Os resultados desses expectations são consumidos pelos verificadores de frescor e volume do `slo_catalog.yaml`.
+- Falhas acima do threshold definido nos SLOs acionam alertas no painel de saúde.

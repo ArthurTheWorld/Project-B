@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CDC Lakehouse — monitor</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0b1020;
+    --card: #141a2f;
+    --card2: #1b2440;
+    --linha: #263053;
+    --texto: #e6ecff;
+    --suave: #8b97bd;
+    --ok: #35d07f;
+    --aviso: #ffc447;
+    --erro: #ff6b6b;
+    --azul: #4da3ff;
+    --roxo: #a56bff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: radial-gradient(circle at 15% -10%, #1a2344, var(--bg) 55%);
+    color: var(--texto);
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    min-height: 100vh;
+    padding: 24px 28px 48px;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; flex-wrap: wrap; margin-bottom: 24px;
+  }
+  h1 { font-size: 1.35rem; font-weight: 650; letter-spacing: -0.01em; }
+  h1 span { color: var(--azul); }
+  .sub { color: var(--suave); font-size: 0.82rem; margin-top: 4px; }
+  .status {
+    display: flex; align-items: center; gap: 8px; font-size: 0.82rem;
+    color: var(--suave); background: var(--card); border: 1px solid var(--linha);
+    padding: 8px 14px; border-radius: 999px;
+  }
+  .pulso {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--ok);
+    box-shadow: 0 0 0 0 rgba(53,208,127,.7); animation: pulso 2s infinite;
+  }
+  @keyframes pulso {
+    0% { box-shadow: 0 0 0 0 rgba(53,208,127,.6); }
+    70% { box-shadow: 0 0 0 10px rgba(53,208,127,0); }
+    100% { box-shadow: 0 0 0 0 rgba(53,208,127,0); }
+  }
+  .kpis {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 14px; margin-bottom: 22px;
+  }
+  .kpi {
+    background: linear-gradient(160deg, var(--card2), var(--card));
+    border: 1px solid var(--linha); border-radius: 14px; padding: 16px 18px;
+  }
+  .kpi .rotulo {
+    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.09em;
+    color: var(--suave); margin-bottom: 8px;
+  }
+  .kpi .valor { font-size: 1.9rem; font-weight: 680; line-height: 1; }
+  .kpi .unidade { font-size: 0.85rem; color: var(--suave); font-weight: 400; margin-left: 4px; }
+  .kpi .nota { font-size: 0.74rem; color: var(--suave); margin-top: 8px; }
+  .kpi.destaque .valor { color: var(--azul); }
+  .kpi.bom .valor { color: var(--ok); }
+  .kpi.atencao .valor { color: var(--aviso); }
+  .kpi.ruim .valor { color: var(--erro); }
+  .grade {
+    display: grid; grid-template-columns: 1.6fr 1fr; gap: 16px; margin-bottom: 16px;
+  }
+  @media (max-width: 980px) { .grade { grid-template-columns: 1fr; } }
+  .painel {
+    background: var(--card); border: 1px solid var(--linha);
+    border-radius: 14px; padding: 18px 20px 12px;
+  }
+  .painel h2 {
+    font-size: 0.9rem; font-weight: 600; margin-bottom: 4px;
+  }
+  .painel .dica { font-size: 0.75rem; color: var(--suave); margin-bottom: 14px; }
+  .canvas-wrap { position: relative; height: 240px; }
+  .erro {
+    background: rgba(255,107,107,.1); border: 1px solid rgba(255,107,107,.4);
+    color: #ffb3b3; border-radius: 12px; padding: 14px 18px;
+    font-size: 0.85rem; margin-bottom: 16px; display: none;
+  }
+  footer {
+    margin-top: 22px; color: var(--suave); font-size: 0.75rem;
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px;
+  }
+  code {
+    font-family: "Cascadia Code", Consolas, monospace;
+    background: rgba(139,151,189,.14); padding: 2px 6px; border-radius: 5px;
+    font-size: 0.78rem;
+  }
+</style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>CDC Lakehouse <span>· monitor</span></h1>
+      <div class="sub">Postgres → Debezium → Kafka → Spark → Delta</div>
+    </div>
+    <div class="status">
+      <span class="pulso" id="pulso"></span>
+      <span id="atualizado">carregando…</span>
+    </div>
+  </header>
+
+  <div class="erro" id="erro"></div>
+
+  <section class="kpis">
+    <div class="kpi destaque">
+      <div class="rotulo">Latência p50</div>
+      <div class="valor"><span id="p50">–</span><span class="unidade">s</span></div>
+      <div class="nota">transação no Postgres → linha no Delta</div>
+    </div>
+    <div class="kpi atencao">
+      <div class="rotulo">Latência p95</div>
+      <div class="valor"><span id="p95">–</span><span class="unidade">s</span></div>
+      <div class="nota">cauda: pior 5% dos eventos</div>
+    </div>
+    <div class="kpi bom">
+      <div class="rotulo">Vazão</div>
+      <div class="valor"><span id="vazao">–</span><span class="unidade">linhas/min</span></div>
+      <div class="nota">média dos últimos minutos</div>
+    </div>
+    <div class="kpi">
+      <div class="rotulo">Linhas no lake</div>
+      <div class="valor" id="linhas">–</div>
+      <div class="nota" id="convergencia">comparando com a origem…</div>
+    </div>
+  </section>
+
+  <section class="grade">
+    <div class="painel">
+      <h2>Latência ponta a ponta</h2>
+      <div class="dica">média, p50, p95 e máxima (segundos)</div>
+      <div class="canvas-wrap"><canvas id="graficoLatencia"></canvas></div>
+    </div>
+    <div class="painel">
+      <h2>Distribuição por operação</h2>
+      <div class="dica">c = insert · u = update · d = delete</div>
+      <div class="canvas-wrap"><canvas id="graficoOperacao"></canvas></div>
+    </div>
+  </section>
+
+  <section class="grade">
+    <div class="painel">
+      <h2>Vazão por minuto</h2>
+      <div class="dica">linhas efetivamente gravadas no Delta</div>
+      <div class="canvas-wrap"><canvas id="graficoVazao"></canvas></div>
+    </div>
+    <div class="painel">
+      <h2>Estado atual dos pedidos</h2>
+      <div class="dica">visão de negócio sobre o lake</div>
+      <div class="canvas-wrap"><canvas id="graficoStatus"></canvas></div>
+    </div>
+  </section>
+
+  <footer>
+    <span>Atualiza a cada 15s · coleta via <code>spark-sql</code> sobre o Delta</span>
+    <span id="rodape-extra"></span>
+  </footer>
+
+<script>
+const CORES = {
+  azul: '#4da3ff', roxo: '#a56bff', verde: '#35d07f',
+  amarelo: '#ffc447', vermelho: '#ff6b6b', suave: '#8b97bd'
+};
+Chart.defaults.color = CORES.suave;
+Chart.defaults.font.family = '"Segoe UI", system-ui, sans-serif';
+Chart.defaults.font.size = 11;
+
+const eixo = {
+  grid: { color: 'rgba(139,151,189,.12)' },
+  ticks: { color: CORES.suave }
+};
+
+function numero(v, casas = 1) {
+  return (v === null || v === undefined || isNaN(v)) ? '–' : Number(v).toFixed(casas);
+}
+
+const graficoLatencia = new Chart(document.getElementById('graficoLatencia'), {
+  type: 'bar',
+  data: {
+    labels: ['média', 'p50', 'p95', 'máxima'],
+    datasets: [{
+      data: [0, 0, 0, 0],
+      backgroundColor: [CORES.azul, CORES.verde, CORES.amarelo, CORES.vermelho],
+      borderRadius: 6,
+      barThickness: 42
+    }]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+    plugins: {
+      legend: { display: false },
+      tooltip: { callbacks: { label: (c) => `${c.parsed.x} s` } }
+    },
+    scales: { x: { ...eixo, beginAtZero: true, title: { display: true, text: 'segundos' } }, y: eixo }
+  }
+});
+
+const graficoOperacao = new Chart(document.getElementById('graficoOperacao'), {
+  type: 'doughnut',
+  data: {
+    labels: ['sem dados'],
+    datasets: [{
+      data: [1],
+      backgroundColor: ['#263053'],
+      borderColor: '#141a2f',
+      borderWidth: 3
+    }]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false, cutout: '62%',
+    plugins: {
+      legend: { position: 'bottom', labels: { boxWidth: 10, padding: 12 } },
+      tooltip: { callbacks: { label: (c) => `${c.label}: ${c.parsed} linhas` } }
+    }
+  }
+});
+
+const graficoVazao = new Chart(document.getElementById('graficoVazao'), {
+  type: 'line',
+  data: {
+    labels: [],
+    datasets: [{
+      data: [],
+      borderColor: CORES.roxo,
+      backgroundColor: 'rgba(165,107,255,.16)',
+      fill: true, tension: 0.35, pointRadius: 0, borderWidth: 2
+    }]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { ...eixo, ticks: { ...eixo.ticks, maxTicksLimit: 8 } },
+      y: { ...eixo, beginAtZero: true, title: { display: true, text: 'linhas/min' } }
+    }
+  }
+});
+
+const graficoStatus = new Chart(document.getElementById('graficoStatus'), {
+  type: 'bar',
+  data: { labels: [], datasets: [{ data: [], backgroundColor: CORES.azul, borderRadius: 6, barThickness: 18 }] },
+  options: {
+    responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+    plugins: { legend: { display: false } },
+    scales: { x: { ...eixo, beginAtZero: true }, y: eixo }
+  }
+});
+
+function rotuloOperacao(op) {
+  return { c: 'insert (c)', u: 'update (u)', r: 'snapshot (r)', d: 'delete (d)' }[op] || op;
+}
+
+async function atualizar() {
+  try {
+    const resposta = await fetch('/api/metricas', { cache: 'no-store' });
+    const m = await resposta.json();
+
+    if (m.erro) {
+      const caixa = document.getElementById('erro');
+      caixa.style.display = 'block';
+      caixa.textContent = 'Falha na coleta: ' + m.erro;
+    } else {
+      document.getElementById('erro').style.display = 'none';
+    }
+
+    document.getElementById('p50').textContent = numero(m.latencia_p50_s);
+    document.getElementById('p95').textContent = numero(m.latencia_p95_s);
+    document.getElementById('vazao').textContent = numero(m.vazao_por_minuto, 0);
+    document.getElementById('linhas').textContent = (m.linhas ?? 0).toLocaleString('pt-BR');
+
+    const convergencia = document.getElementById('convergencia');
+    if (m.origem_linhas !== null && m.origem_linhas !== undefined) {
+      const diferenca = m.linhas - m.origem_linhas;
+      convergencia.textContent = diferenca === 0
+        ? `origem: ${m.origem_linhas.toLocaleString('pt-BR')} · sincronizado`
+        : `origem: ${m.origem_linhas.toLocaleString('pt-BR')} · diferença de ${diferenca}`;
+      convergencia.style.color = diferenca === 0 ? CORES.verde : CORES.amarelo;
+    } else {
+      convergencia.textContent = 'origem indisponível';
+    }
+
+    graficoLatencia.data.datasets[0].data = [
+      m.latencia_media_s ?? 0, m.latencia_p50_s ?? 0,
+      m.latencia_p95_s ?? 0, m.latencia_max_s ?? 0
+    ];
+    graficoLatencia.update('none');
+
+    const ops = m.por_operacao || {};
+    const chavesOp = Object.keys(ops);
+    graficoOperacao.data.labels = chavesOp.length ? chavesOp.map(rotuloOperacao) : ['sem dados'];
+    graficoOperacao.data.datasets[0].data = chavesOp.length ? chavesOp.map(k => ops[k]) : [1];
+    graficoOperacao.data.datasets[0].backgroundColor = chavesOp.length
+      ? [CORES.verde, CORES.azul, CORES.amarelo, CORES.vermelho, CORES.roxo]
+      : ['#263053'];
+    graficoOperacao.update('none');
+
+    const serie = m.serie_minuto || [];
+    graficoVazao.data.labels = serie.map(p => (p.minuto || '').slice(11, 16));
+    graficoVazao.data.datasets[0].data = serie.map(p => p.linhas);
+    graficoVazao.update('none');
+
+    const st = m.por_status || {};
+    const chavesSt = Object.keys(st);
+    graficoStatus.data.labels = chavesSt;
+    graficoStatus.data.datasets[0].data = chavesSt.map(k => st[k]);
+    graficoStatus.update('none');
+
+    document.getElementById('pulso').style.background = m.erro ? CORES.vermelho : CORES.verde;
+    document.getElementById('atualizado').textContent = m.coletado_em
+      ? 'atualizado ' + new Date(m.coletado_em).toLocaleTimeString('pt-BR')
+      : 'aguardando coleta';
+    document.getElementById('rodape-extra').textContent =
+      `latência média ${numero(m.latencia_media_s)}s · máxima ${numero(m.latencia_max_s)}s`;
+  } catch (e) {
+    document.getElementById('pulso').style.background = CORES.vermelho;
+    document.getElementById('atualizado').textContent = 'sem conexão com o servidor';
+  }
+}
+
+atualizar();
+setInterval(atualizar, 15000);
+</script>
+</body>
+</html>
