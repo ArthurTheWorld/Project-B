@@ -145,6 +145,12 @@ services:
       DELTA_PATH: /data/delta/pedidos
       CHECKPOINT: /data/checkpoints/pedidos
       STARTING_OFFSETS: earliest
+      # OpenLineage e OPT-IN: com "false" (default) nada muda no job.
+      OPENLINEAGE_ENABLED: ${OPENLINEAGE_ENABLED:-false}
+      OPENLINEAGE_NAMESPACE: cdc-lakehouse
+      OPENLINEAGE_TRANSPORT: ${OPENLINEAGE_TRANSPORT:-console}
+      OPENLINEAGE_URL: ${OPENLINEAGE_URL:-}
+      OPENLINEAGE_PACKAGE: io.openlineage:openlineage-spark_2.12:1.9.1
     volumes:
       - delta:/data
       - ivy:/root/.ivy2
@@ -156,13 +162,27 @@ services:
       - /bin/bash
       - -c
       - |
+        set -e
+        PACOTES="io.delta:delta-spark_2.12:3.2.0,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1"
+        LINEAGE=""
+        if [ "$${OPENLINEAGE_ENABLED:-false}" = "true" ]; then
+          echo "[openlineage] habilitado (transporte=$${OPENLINEAGE_TRANSPORT})"
+          PACOTES="$$PACOTES,$${OPENLINEAGE_PACKAGE}"
+          LINEAGE="--conf spark.extraListeners=io.openlineage.spark.agent.OpenLineageSparkListener \
+          --conf spark.openlineage.namespace=$${OPENLINEAGE_NAMESPACE} \
+          --conf spark.openlineage.transport.type=$${OPENLINEAGE_TRANSPORT}"
+          if [ -n "$${OPENLINEAGE_URL}" ]; then
+            LINEAGE="$$LINEAGE --conf spark.openlineage.transport.url=$${OPENLINEAGE_URL}"
+          fi
+        fi
         /opt/spark/bin/spark-submit \
           --master 'local[2]' \
           --driver-memory 1g \
-          --packages io.delta:delta-spark_2.12:3.2.0,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1 \
+          --packages "$$PACOTES" \
           --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension \
           --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
           --conf spark.databricks.delta.schema.autoMerge.enabled=true \
+          $$LINEAGE \
           /opt/job.py
 
 volumes:
