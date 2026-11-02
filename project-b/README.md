@@ -77,7 +77,7 @@ project-b/
 1. **Definir KPIs e SLOs** – sentar com os donos das tabelas e acordar metas realistas.
 2. **Criar `slo_catalog.yaml`** – modelo inicial com as colunas: `table_name`, `freshness_target`, `volume_target`, `schema_target`, `distribution_target`.
 3. **Integrar OpenLineage** ao job Spark existente (`spark/job.py`) – adicionar o hook `openlineage.spark` e garantir que os eventos sejam emitidos.
-4. **Criar primeira expectation** com Great Expectations – ex.: `expect_column_values_to_be_between` para `preço` no `stg_coingecko__mercado`.
+4. **Criar primeira expectation** – ex.: `preco_dentro_do_intervalo` para `preco` no `stg_coingecko__mercado` (ver `expectations/mercado_expectations.py`). As suítes são Python puro, sem dependência de Great Expectations.
 5. **Construir painel inicial** no Metabase – uma página "Saúde da Plataforma" com indicadores de frescor e volume.
 
 ---

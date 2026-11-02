@@ -1,33 +1,87 @@
-slo_catalog.yaml
-version: 1.0
+# Catálogo de SLOs do Projeto B.
+#
+# Fonte de verdade do schema:
+#   postgres/init/01_schema.sql  (loja.pedidos)
+#   spark/job.py                 (colunas técnicas materializadas no Delta)
+#
+# Cada tabela declara quatro alvos: freshness, volume, schema e distribution.
+# Os nomes de status abaixo são os do gerador de carga (generator/carga.py),
+# não rótulos genéricos em inglês.
+
+version: "1.0"
+
 tables:
   - name: loja.pedidos
+    owner: pipeline-cdc
     freshness_target:
+      # >95% das linhas com menos de 1h entre _evento_em e _ingerido_em
       max_age_minutes: 60
-      # >95% dos dados com menos de 1h
+      coluna_evento: _evento_em
+      coluna_ingestao: _ingerido_em
     volume_target:
+      # Mínimo de linhas por micro-lote do Spark (trigger de 10s)
       min_rows_per_batch: 100
-      # Esperado mínimo de linhas por lote Spark
+      janela_minutos: 60
     schema_target:
+      # Mudança de schema exige nova versão deste catálogo
       allow_add_column: false
-      # Mudanças de schema exigem nova versão do catálogo
+      colunas_obrigatorias:
+        - pedido_id
+        - cliente_id
+        - status
+        - valor
+        - canal
+        - criado_em
+        - atualizado_em
+      colunas_tecnicas:
+        - _op
+        - _lsn
+        - _evento_em
+        - _ingerido_em
+      chave_primaria: pedido_id
     distribution_target:
+      # Percentual aproximado de pedidos por status (soma 100)
       status_distribution:
-        pending: 30
-        processing: 50
-        completed: 20
-        # Percentual aproximado de pedidos por status
+        novo: 30
+        pago: 50
+        entregue: 20
+      canais_validos:
+        - app
+        - web
+        - loja
+        - telefone
+      valor:
+        min: 0.01
+        max: 1000000.00
+
   - name: stg_coingecko__mercado
+    owner: pipeline-mercado
     freshness_target:
-      max_age_minutes: 120
       # Dados a cada 2h são aceitáveis para séries temporais
+      max_age_minutes: 120
+      coluna_evento: timestamp
     volume_target:
       min_rows_per_batch: 50
     schema_target:
+      # Permitir nova coluna via autoMerge do Delta
       allow_add_column: true
-      # Permitir nova coluna via auto‑merge do Delta
+      colunas_obrigatorias:
+        - moeda
+        - preco
+        - volume
+        - timestamp
+      grao:
+        - moeda
+        - timestamp
     distribution_target:
       price_range:
+        # Intervalo de preço esperado (USD), coerente com as expectations
         min: 0
         max: 1000
-        # Intervalo de preço esperado (USD)
+      moedas_validas:
+        - BTC
+        - ETH
+        - BNB
+        - ADA
+        - DOGE
+        - SOL

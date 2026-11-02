@@ -1,77 +1,97 @@
-# OpenLineage Integration for Spark Job (Projeto B)
+# OpenLineage no job Spark (Projeto B)
 
-This script adds OpenLineage event emission to the existing Spark Structured Streaming job. 
-It should be placed in `spark/job.py` (or imported from a separate module).
+Este documento descreve como o lineage é obtido no pipeline CDC. Ele foi
+reescrito porque a versão anterior descrevia uma integração que **não existe**
+e que derrubava o job.
 
-## Etapas de integração
+## O erro da versão anterior
 
-### 1. Instalar a dependência
-```bash
-pip install openlineage-spark
-```
-
-### 2. Modificar `spark/job.py` (trechos a adicionar)
+O texto antigo mandava colocar isto no topo de `spark/job.py`:
 
 ```python
 from openlineage.spark import OpenLineageSparkDataset
 from openlineage.client.emitters import LocalEmitter
-
-# Inicializar emitter no SparkSession
-spark = SparkSession.builder \
-    .appName("cdc-lakehouse-spark") \
-    .config("spark.openlineage.extract.append fed", "true") \
-    .getOrCreate()
-
-# Opcional: usar emitter local para desenvolvimento
-emitter = LocalEmitter(namespace="cdc-lakehouse")
-
-# Registrar UDFs ou wrappers que emitam events
-# Exemplo: ao iniciar o streaming, emitir dataset de entrada
-input_dataset = OpenLineageSparkDataset(
-    name="loja.pedidos",
-    fields=["pedido_id", "cliente_id", "preço", "status", "ingested_at"],
-    descriptions={"pedido_id": "Chave primária da tabela de pedidos"},
-)
-emitter.emit("START", {"node": "spark_job", "runId": spark.sparkContext.applicationId, "timestamp": time.time()})
-
-# No foreachBatch, após ler do Kafka e antes do MERGE, emitir dataset de saída
-def foreach_batch_function(batch_df, batch_id):
-    # ... processamento existente ...
-    
-    # Emitir dataset de saída do batch
-    output_dataset = OpenLineageSparkDataset(
-        name="delta.loja_pedidos",
-        fields=["pedido_id", "cliente_id", "preço", "status", "ingested_at", "updated_at"],
-        descriptions={"pedido_id": "Chave primária da tabela Delta"},
-    )
-    emitter.emit("COMPLETE", {"node": "spark_job", "runId": spark.sparkContext.applicationId, "timestamp": time.time()})
-
-# Registrar o foreachBatch com o wrapper que emite events
-# (depende da versão do openlineage-spark, geralmente se configura via spark.conf)
-spark.conf.set("openlineage.schema.mode", "glossary")
 ```
 
-### 3. Verificar eventos
-- Ao submeter o job, os eventos aparecerão no dashboard do OpenLineage (ou Marquez, caso esteja integrado).
-- No console Spark, deverá aparecer log similar a:
-  ```
-  2025-11-02 03:00:00 INFO [openlineage] Emitting START event for node spark_job
-  2025-11-02 03:00:01 INFO [openlineage] Emitting COMPLETE event for node spark_job
-  ```
+Isso quebra o job por dois motivos independentes:
 
-### 4. (Opcional) Integrar com Marquez
-- Se já usa Marquez, basta configurar o backend comum (Postgres/MySQL) e os events fluirão automaticamente.
-- Caso contrário, o emitter local basta para gerar o lineage dentro do seu próprio ambiente.
+1. **O pacote é Scala, não Python.** `openlineage-spark` é um JAR publicado no
+   Maven Central (`io.openlineage:openlineage-spark_2.12`). Não existe módulo
+   Python chamado `openlineage.spark` no classpath do Spark.
+2. **`LocalEmitter` não existe mais.** Foi removido na linha 1.x do cliente
+   Python, junto com `set_local_emitter`. O import levanta `ImportError`
+   imediatamente, na subida do container — antes de qualquer batch rodar.
 
-## Arquivo sugerido: `spark/openlineage_config.py`
+Resultado prático: o job morria no boot com `ImportError`, e o pipeline CDC
+ficava parado com o OpenLineage *desligado*. A observabilidade derrubou o que
+deveria observar.
 
-```python
-from openlineage.client import set_local_emitter
-from openlineage.client.emitters import LocalEmitter
+## Como funciona de verdade
 
-# Configurar emitter local (desenvolvimento)
-set_local_emitter(LocalEmitter(namespace="cdc-lakehouse"))
+Em Spark, OpenLineage é um **listener** registrado via `spark.extraListeners`.
+O JAR é baixado pelo próprio Spark com `--packages` e não requer nenhuma
+mudança no código Python do job.
+
+Já implementado em `docker-compose.yml` (serviço `spark`):
+
+```bash
+PACOTES="io.delta:delta-spark_2.12:3.2.0,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1"
+LINEAGE=""
+if [ "${OPENLINEAGE_ENABLED:-false}" = "true" ]; then
+  LINEAGE="--packages io.openlineage:openlineage-spark_2.12:1.9.1 \
+    --conf spark.extraListeners=io.openlineage.spark.agent.OpenLineageSparkListener \
+    --conf spark.openlineage.namespace=cdc-lakehouse \
+    --conf spark.openlineage.transport.type=console"
+fi
 ```
 
-Basta importar este módulo no topo do `spark/job.py` antes de iniciar o SparkSession.
+### Variáveis de ambiente
+
+| Variável | Padrão | Descrição |
+|---|---|---|
+| `OPENLINEAGE_ENABLED` | `false` | Liga/desliga o listener. O job roda igual com ele desligado. |
+| `OPENLINEAGE_NAMESPACE` | `cdc-lakehouse` | Namespace dos jobs no backend de lineage. |
+| `OPENLINEAGE_TRANSPORT` | `console` | `console`, `http`, `file`… |
+| `OPENLINEAGE_URL` | vazio | Endpoint do backend (Marquez etc.) quando o transporte é `http`. |
+| `OPENLINEAGE_PACKAGE` | `io.openlineage:openlineage-spark_2.12:1.9.1` | Coordenada Maven do JAR. |
+
+### Ligando localmente
+
+```powershell
+$env:OPENLINEAGE_ENABLED = "true"
+docker compose up -d spark
+docker compose logs -f spark   # os eventos aparecem como JSON no stdout
 ```
+
+Para enviar a um Marquez em vez do console:
+
+```powershell
+$env:OPENLINEAGE_ENABLED = "true"
+$env:OPENLINEAGE_TRANSPORT = "http"
+$env:OPENLINEAGE_URL = "http://marquez:5000"
+docker compose up -d spark
+```
+
+## Garantia que o projeto assume
+
+O requisito duro é: **o job nunca pode quebrar por causa do OpenLineage.**
+Isso é verificado estaticamente por `tests/test_job_contrato.py`:
+
+- `test_job_nao_importa_openlineage_em_python` — proíbe qualquer `import openlineage` em `spark/`.
+- `test_compose_e_opt_in_para_openlineage` — o compose só adiciona o listener quando `OPENLINEAGE_ENABLED=true`.
+
+O que **não** está provado: que os eventos chegam corretamente ao backend com
+o Docker rodando. Essa verificação exige subir a stack e inspecionar o stdout
+do container `spark`.
+
+## Dataset esperado
+
+Com o listener ligado, cada micro-lote emite eventos para:
+
+- **entrada**: tópico Kafka `loja.loja.pedidos`
+- **saída**: tabela Delta em `DELTA_PATH` (`/data/delta/pedidos`)
+
+Os campos do dataset de saída são os do schema real — `pedido_id`, `cliente_id`,
+`status`, `valor`, `canal`, `criado_em`, `atualizado_em` — mais as colunas
+técnicas `_op`, `_lsn`, `_evento_em`, `_ingerido_em`. Não existem `preço`,
+`quantidade` nem `ingested_at` nesta tabela (esses são do projeto de cripto).

@@ -1,63 +1,199 @@
-# Great Expectations Suite for Projeto B - Mercado
+"""Suíte de expectations para stg_coingecko__mercado (Projeto B).
 
-This suite validates the key data quality indicators that feed the SLOs defined in `slo_catalog.yaml` for the `stg_coingecko__mercado` table.
+Este arquivo é Python executável de verdade — não um documento Markdown.
 
-## Expectations definitions
+A tabela ``stg_coingecko__mercado`` vem do projeto de cripto (crypto-ELT) e
+alimenta o segundo SLO do catálogo. Diferente de ``loja.pedidos``, ela é
+carregada a cada 2h e admite evolução de schema (``allow_add_column: true``).
 
-### expectations/mercado_expectations.py
-```python
-import great_expectations as gx
-from great_expectations.core import ExpectationSuite
+Colunas esperadas (fonte: ``slo_catalog.yaml`` + dbt staging):
 
-def create_mercado_suite():
-    suite = ExpectationSuite(name="mercado_expectations")
+    moeda, preco, volume, timestamp
 
-    # 1. Preço deve ser positivo
-    suite.add_expectation(
-        gx.expectation.expect_column_values_to_be_between(
-            column="preço",
-            min_value=0.01,
-            max_value=None
-        )
+Os nomes estão em português porque o restante do repositório também está —
+o staging do dbt renomeia ``price`` → ``preco`` e ``snapshot_at`` → ``timestamp``.
+
+Por que não usar great_expectations aqui: o pacote não está instalado no
+ambiente e o CI do projeto roda sem Spark. As expectations abaixo são
+declarativas e verificáveis com stdlib puro.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Callable, Iterable, Mapping
+
+
+COLUNAS_OBRIGATORIAS: tuple[str, ...] = ("moeda", "preco", "volume", "timestamp")
+
+# Moedas acompanhadas pelo pipeline de mercado.
+MOEDAS_VALIDAS: tuple[str, ...] = ("BTC", "ETH", "BNB", "ADA", "DOGE", "SOL")
+
+# Intervalo de preço esperado, coerente com slo_catalog.yaml (0..1000 USD).
+PRECO_MINIMO = 0.0
+PRECO_MAXIMO = 1000.0
+
+# Volume nunca pode ser negativo.
+VOLUME_MINIMO = 0.0
+
+
+@dataclass(frozen=True)
+class ResultadoExpectation:
+    """Resultado de uma expectation individual."""
+
+    nome: str
+    coluna: str | None
+    sucesso: bool
+    detalhe: str = ""
+
+
+@dataclass
+class SuiteMercado:
+    """Suíte de expectativas para a tabela stg_coingecko__mercado."""
+
+    nome: str = "mercado_expectations"
+    tabela: str = "stg_coingecko__mercado"
+    colunas_obrigatorias: tuple[str, ...] = COLUNAS_OBRIGATORIAS
+    moedas_validas: tuple[str, ...] = MOEDAS_VALIDAS
+    preco_minimo: float = PRECO_MINIMO
+    preco_maximo: float = PRECO_MAXIMO
+    volume_minimo: float = VOLUME_MINIMO
+    expectations: list[Callable[[Iterable[Mapping[str, Any]]], ResultadoExpectation]] = field(
+        default_factory=list
     )
 
-    # 2. Volume negociado deve ser não-negativo
-    suite.add_expectation(
-        gx.expectation.expect_column_values_to_be_between(
-            column="volume",
-            min_value=0,
-            max_value=None
+    def __post_init__(self) -> None:
+        if not self.expectations:
+            self.expectations = [
+                self.colunas_esperadas_presentes,
+                self.moeda_no_dominio,
+                self.preco_dentro_do_intervalo,
+                self.volume_nao_negativo,
+                self.timestamp_nao_nulo,
+                self.uma_linha_por_moeda_e_timestamp,
+            ]
+
+    # ------------------------------------------------------------------ #
+    # Expectations
+    # ------------------------------------------------------------------ #
+    def colunas_esperadas_presentes(
+        self, linhas: Iterable[Mapping[str, Any]]
+    ) -> ResultadoExpectation:
+        """Toda linha tem as colunas obrigatórias do staging."""
+        esperadas = set(self.colunas_obrigatorias)
+        faltando: set[str] = set()
+        for linha in linhas:
+            faltando |= esperadas - set(linha.keys())
+            if faltando:
+                break
+        return ResultadoExpectation(
+            nome="colunas_esperadas_presentes",
+            coluna=None,
+            sucesso=not faltando,
+            detalhe="" if not faltando else f"colunas ausentes: {sorted(faltando)}",
         )
-    )
 
-    # 3. Moeda must be a known ISO code (ex.: BTC, ETH, DOGE)
-    suite.add_expectation(
-        gx.expectation.expect_column_values_to_be_in_set(
-            column="moeda",
-            value_set=["BTC", "ETH", "DOGE", "BNB", "ADA"]
+    def moeda_no_dominio(
+        self, linhas: Iterable[Mapping[str, Any]]
+    ) -> ResultadoExpectation:
+        """moeda pertence ao conjunto acompanhado pelo pipeline."""
+        invalidos: dict[Any, int] = {}
+        for linha in linhas:
+            valor = linha.get("moeda")
+            if valor not in self.moedas_validas:
+                invalidos[valor] = invalidos.get(valor, 0) + 1
+        return ResultadoExpectation(
+            nome="moeda_no_dominio",
+            coluna="moeda",
+            sucesso=not invalidos,
+            detalhe="" if not invalidos else f"fora do domínio: {invalidos}",
         )
-    )
 
-    # 4. Timestamp dentro de janela esperada (ultimas 2h)
-    suite.add_expectation(
-        gx.expectation.expect_column_values_to_not_be_greater_than(
-            column="timestamp",
-            value="2025-12-31T23:59:59Z"
+    def preco_dentro_do_intervalo(
+        self, linhas: Iterable[Mapping[str, Any]]
+    ) -> ResultadoExpectation:
+        """preco é numérico e cai no intervalo do SLO (0..1000)."""
+        fora = 0
+        nao_numerico = 0
+        for linha in linhas:
+            valor = linha.get("preco")
+            try:
+                numero = float(valor)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                nao_numerico += 1
+                continue
+            if not (self.preco_minimo <= numero <= self.preco_maximo):
+                fora += 1
+        return ResultadoExpectation(
+            nome="preco_dentro_do_intervalo",
+            coluna="preco",
+            sucesso=fora == 0 and nao_numerico == 0,
+            detalhe=f"fora_do_intervalo={fora} nao_numerico={nao_numerico}",
         )
-    )
 
-    return suite
-```
+    def volume_nao_negativo(
+        self, linhas: Iterable[Mapping[str, Any]]
+    ) -> ResultadoExpectation:
+        """volume é numérico e >= 0."""
+        negativos = 0
+        nao_numerico = 0
+        for linha in linhas:
+            valor = linha.get("volume")
+            try:
+                numero = float(valor)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                nao_numerico += 1
+                continue
+            if numero < self.volume_minimo:
+                negativos += 1
+        return ResultadoExpectation(
+            nome="volume_nao_negativo",
+            coluna="volume",
+            sucesso=negativos == 0 and nao_numerico == 0,
+            detalhe=f"negativos={negativos} nao_numerico={nao_numerico}",
+        )
 
-## Como usar
+    def timestamp_nao_nulo(
+        self, linhas: Iterable[Mapping[str, Any]]
+    ) -> ResultadoExpectation:
+        """timestamp é a base da métrica de freshness — não pode faltar."""
+        nulos = sum(1 for linha in linhas if linha.get("timestamp") is None)
+        return ResultadoExpectation(
+            nome="timestamp_nao_nulo",
+            coluna="timestamp",
+            sucesso=nulos == 0,
+            detalhe=f"nulos={nulos}",
+        )
 
-```bash
-# No ambiente Spark/Databricks
-python -m great_expectations suite validate expectations/mercado_expectations.py
-```
+    def uma_linha_por_moeda_e_timestamp(
+        self, linhas: Iterable[Mapping[str, Any]]
+    ) -> ResultadoExpectation:
+        """O grão do staging é (moeda, timestamp) — não pode haver duplicata."""
+        vistos: set[tuple[Any, Any]] = set()
+        duplicados = 0
+        for linha in linhas:
+            chave = (linha.get("moeda"), linha.get("timestamp"))
+            if chave in vistos:
+                duplicados += 1
+            vistos.add(chave)
+        return ResultadoExpectation(
+            nome="uma_linha_por_moeda_e_timestamp",
+            coluna="moeda,timestamp",
+            sucesso=duplicados == 0,
+            detalhe=f"duplicados={duplicados}",
+        )
 
-## Integração com SLOs
+    # ------------------------------------------------------------------ #
+    # Execução
+    # ------------------------------------------------------------------ #
+    def validar(
+        self, linhas: Iterable[Mapping[str, Any]]
+    ) -> list[ResultadoExpectation]:
+        """Roda todas as expectations sobre uma coleção de linhas."""
+        materializadas = list(linhas)
+        return [expectation(materializadas) for expectation in self.expectations]
 
-- Os resultados desses expectations são consumidos pelos verificadores de frescor e volume do `slo_catalog.yaml`.
-- Falhas acima do threshold definido nos SLOs acionam alertas no painel de saúde.
-```
+
+def create_mercado_suite() -> SuiteMercado:
+    """Fábrica usada por scripts/run_expectations.py e pelos testes."""
+    return SuiteMercado()
