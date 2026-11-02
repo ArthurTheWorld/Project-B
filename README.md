@@ -1,6 +1,6 @@
 # CDC Lakehouse — CDC em tempo real de Postgres para Delta Lake
 
-**Repositório:** https://github.com/ArthurTheWorld/cdc-lakehouse
+**Repositório:** https://github.com/ArthurTheWorld/Project-B
 
 Pipeline de **Change Data Capture** de ponta a ponta: as mudanças de um banco
 transacional viram eventos, os eventos viram tabelas analíticas, e as tabelas
@@ -14,6 +14,11 @@ de um pipeline que serve para produção:
 | **Idempotência** | `MERGE` por chave primária; reprocessar o histórico inteiro não duplica nada |
 | **Evolução de schema** | Coluna nova na origem chega ao Delta e é absorvida sem reiniciar o job |
 | **Deletes** | `DELETE` na origem vira `DELETE` no lake (coisa que polling nunca vê) |
+
+Este repositório contém **dois projetos**:
+
+- **Projeto A (este diretório)** — a plataforma CDC: Postgres → Debezium → Kafka → Spark → Delta Lake → painel.
+- **[Projeto B](project-b/)** — a camada de confiabilidade sobre a plataforma: catálogo de SLOs, suítes de expectations, runbooks de incidente, rastreamento de MTTR e lineage com OpenLineage.
 
 ---
 
@@ -188,24 +193,36 @@ tabela — duas fontes de verdade para o mesmo número.
 
 ```
 cdc-lakehouse/
-├─ docker-compose.yml         # a stack inteira
-├─ .env.example               # variáveis ajustáveis (copie para .env)
-├─ postgres/init/01_schema.sql  # schema OLTP + replica identity full
-├─ debezium/loja-pedidos.json   # configuração do conector
-├─ generator/carga.py           # gerador de carga (INSERT/UPDATE/DELETE)
+├─ docker-compose.yml            # a stack inteira (Projeto A)
+├─ .env.example                  # variáveis ajustáveis (copie para .env)
+├─ plano_projeto_A.md            # plano de 90 dias da plataforma CDC
+├─ postgres/init/01_schema.sql   # schema OLTP + replica identity full
+├─ debezium/loja-pedidos.json    # configuração do conector
+├─ generator/carga.py            # gerador de carga (INSERT/UPDATE/DELETE)
 ├─ spark/
-│  ├─ job.py                    # Structured Streaming + foreachBatch
-│  ├─ merge_sql.py              # montagem do MERGE (testável sem Spark)
+│  ├─ job.py                     # Structured Streaming + foreachBatch
+│  ├─ merge_sql.py               # montagem do MERGE (testável sem Spark)
 │  └─ Dockerfile
 ├─ monitor/
-│  ├─ coleta.py                 # coleta de métricas via spark-sql
-│  ├─ servidor.py               # API + servidor do painel
-│  └─ index.html                # o painel
-├─ sql/                         # verificacao, evolucao, coleta, metricas
-├─ scripts/                     # start, parar, demo-replay, demo-evolucao
-├─ tests/test_merge_sql.py      # testes do MERGE
-├─ docs/decisoes.md             # ADRs (001 a 008)
-└─ .github/workflows/ci.yml     # CI: compileall + pytest + compose config
+│  ├─ coleta.py                  # coleta de métricas via spark-sql
+│  ├─ servidor.py                # API + servidor do painel
+│  └─ index.html                 # o painel
+├─ sql/                          # verificacao, evolucao, coleta, metricas
+├─ scripts/                      # start, parar, demo-replay, demo-evolucao
+├─ tests/
+│  ├─ test_merge_sql.py          # testes do MERGE
+│  └─ test_job_contrato.py       # contrato estático do job (schema, ordem do MERGE, OpenLineage opt-in)
+├─ docs/decisoes.md              # ADRs (001 a 008)
+├─ .github/workflows/ci.yml      # CI do Projeto A: compileall + pytest + compose config
+└─ project-b/                    # Projeto B: confiabilidade de dados
+   ├─ README.md
+   ├─ slo_catalog.yaml           # catálogo de SLOs por tabela
+   ├─ spark_openlineage_config.md
+   ├─ expectations/              # suítes Python (pedidos e mercado)
+   ├─ runbooks/                  # latência alta, volume inesperado, schema change
+   ├─ dashboards/metabase_health.json
+   ├─ scripts/                   # run_expectations, mttr_tracker, simuladores
+   └─ .github/workflows/ci.yml   # CI do Projeto B
 ```
 
 ---
@@ -279,8 +296,21 @@ ainda não resolve.
 
 ## Estado atual e roadmap
 
-**Funcionando:** captura CDC com deletes, merge idempotente testado por replay,
-evolução de schema sem downtime, monitor de latência/vazão e CI.
+**Funcionando (validado estaticamente):** captura CDC com deletes, merge
+idempotente testado por replay, evolução de schema sem downtime, monitor de
+latência/vazão e CI.
+
+> **Ressalva honesta:** o Docker Desktop esteve parado durante a maior parte do
+> desenvolvimento recente. Os testes de contrato, o `compileall` e o
+> `docker compose config` passam, mas **a execução end-to-end contra
+> Kafka/Spark/Postgres não foi provada** nesta rodada. Suba a stack com
+> `.\scripts\start.ps1` e siga a seção de verificação para confirmar.
+
+**Projeto B (entregue):** SLOs declarados em [`project-b/slo_catalog.yaml`](project-b/slo_catalog.yaml),
+suítes de expectations em Python puro para `loja.pedidos` e
+`stg_coingecko__mercado`, três runbooks de incidente, simuladores de falha,
+`mttr_tracker.py` para medir tempo de recuperação, dashboard Metabase e
+lineage opt-in com OpenLineage. Detalhes em [`project-b/README.md`](project-b/README.md).
 
 **Ainda não existe neste repositório** (não procure, não está lá):
 
@@ -291,12 +321,9 @@ evolução de schema sem downtime, monitor de latência/vazão e CI.
   As metas do plano (5 000 ev/s, p95 ≤ 2 s) **não foram medidas**.
 - **dbt / camada silver e gold** — o lake tem a tabela bronze; as camadas
   analíticas estão no plano, não no código.
-- **Metabase** — o painel atual é o monitor da pasta `monitor/`.
+- **Metabase rodando** — o painel atual é o monitor da pasta `monitor/`; o
+  Projeto B traz só a definição JSON do dashboard de saúde.
 - **Alertas** — o monitor exibe, não notifica.
-
-Os itens de confiabilidade (SLOs, expectations, runbooks, MTTR) vivem no
-diretório [`cdc-lakehouse/project-b/`](cdc-lakehouse/project-b/) deste mesmo
-repositório, como Projeto B.
 
 ---
 
