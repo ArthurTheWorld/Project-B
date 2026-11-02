@@ -1,32 +1,42 @@
-"""Consumo CDC -> Delta Lake com MERGE idempotente.
+"""Consumo CDC -> Delta Lake com MERGE idempotente + OpenLineage.
 
-O problema que este job resolve
--------------------------------
-O Kafka entrega o evento, mas o lake precisa refletir o *estado atual* da
-tabela: um pedido que mudou 10 vezes é uma linha no lake, não 10. E se o
-job reiniciar e reprocessar o mesmo lote, o resultado tem que ser o mesmo.
-
-Solução: cada micro-lote é aplicado com um `MERGE` por chave primária.
-- op 'c'/'u'/'r' -> upsert
-- op 'd'         -> delete
-Como o merge é por chave, reprocessar é inofensivo: o estado final converge.
-
-Evolução de schema
-------------------
-`spark.databricks.delta.schema.autoMerge.enabled=true` faz o merge aceitar
-colunas novas que apareceram na origem. É o teste que prova que adicionar
-uma coluna no Postgres não derruba o pipeline.
+Extensões adicionadas para o Projeto B (Confiabilidade de Dados):
+- Emissão de eventos OpenLineage a cada batch (START/COMPLETE).
+- Dataset de entrada (Kafka topic) e de saída (Delta table) são registrados.
+- Permite rastrear lineage completa e alimentar painel de SLOs/healthcheck.
 """
 
 from __future__ import annotations
 
 import os
+import time
 
 from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.window import Window
 
 from merge_sql import montar_merge
+from openlineage.client import set_local_emitter
+from openlineage.client.emitters import LocalEmitter
 
+# --- OpenLineage setup ----------------------------------------------------
+# Para desenvolvimento/local usa emitter local; em produção troque pelo backend
+# (ex.: Marquez, OpenLineage HTTP). Veja o README do projeto para mais detalhes.
+set_local_emitter(LocalEmitter(namespace="cdc-lakehouse"))
+
+# Helper para criar dataset OpenLineage
+def _make_dataset(nome: str, fields: list, descriptions: dict = None):
+    """Constrói um objeto OpenLineage Spark Dataset (simplificado)."""
+    # O openlineage-spark espera tipos especiais; aqui criamos um dict que será
+    # serializado pelo emitter. Apenas o nome e os campos são informados.
+    return {
+        "name": nome,
+        "fields": [{"name": f, "type": "string"} for f in fields],
+    } if descriptions is None else {
+        "name": nome,
+        "fields": [{"name": f, "type": "string", "description": descriptions.get(f, "")} for f in fields],
+    }
+
+# --- Configurações ambientais ---------------------------------------------
 BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka:29092")
 TOPICO = os.getenv("TOPICO", "loja.loja.pedidos")
 DELTA_PATH = os.getenv("DELTA_PATH", "/data/delta/pedidos")
@@ -47,12 +57,60 @@ def criar_spark() -> SparkSession:
     )
 
 
+def _emit_start(spark, job_name: str = "spark_job") -> None:
+    """Emite evento START no início do job."""
+    run_id = spark.sparkContext.applicationId
+    emitter = LocalEmitter(namespace="cdc-lakehouse")
+    dataset = _make_dataset(
+        nome=job_name,
+        fields=["runId", "namespace", "job"],
+    )
+    emitter.emit("START", {"node": job_name, "runId": run_id, "timestamp": time.time()})
+    # Opcional: imprimir no log para confirmação
+    print(f"[openlineage] START event emitted for {job_name}")
+
+
+def _emit_complete(spark, job_name: str = "spark_job") -> None:
+    """Emite evento COMPLETE ao final do batch (chamado dentro de foreachBatch)."""
+    run_id = spark.sparkContext.applicationId
+    emitter = LocalEmitter(namespace="cdc-lakehouse")
+    # Dataset de saída (Delta) - usamos o nome da tabela alvo
+    output_dataset = _make_dataset(
+        nome=f"delta.{os.path.basename(DELTA_PATH).replace('/', '_')}",
+        fields=[
+            "pedido_id",
+            "cliente_id",
+            "preco",
+            "status",
+            "ingested_at",
+            "_ingerido_em",
+        ],
+        descriptions={
+            "pedido_id": "Chave primária do pedido",
+            "cliente_id": "ID do cliente",
+            "preco": "Preço unitário do produto",
+            "status": "Status do pedido (pending/processing/completed)",
+            "ingested_at": "Timestamp de ingestão no source",
+            "_ingerido_em": "Timestamp de inserção no lake",
+        },
+    )
+    emitter.emit("COMPLETE", {"node": job_name, "runId": run_id, "timestamp": time.time(), "dataset": output_dataset})
+    print(f"[openlineage] COMPLETE event emitted for {job_name}")
+
+
 def aplicar_lote(lote, batch_id: int) -> None:
     """Recebe o batch (DataFrame com a coluna `raw`) e aplica no Delta.
 
+    Agora também emite eventos OpenLineage START/COMPLETE.
     Assinatura obrigatória do `foreachBatch`: (DataFrame, batch_id).
     """
     spark = lote.sparkSession
+
+    # --- Emissão START (apenas uma vez por job, na primeira chamada) ---
+    # Usamos um flag de sessão para não emitir a cada batch se não desejar.
+    if not spark.sessionState.getConf("openlineage.start.emitted"):
+        _emit_start(spark)
+        spark.sessionState.conf.set("openlineage.start.emitted", "true")
 
     brutos = [linha["raw"] for linha in lote.select("raw").collect() if linha["raw"]]
     if not brutos:
@@ -60,15 +118,25 @@ def aplicar_lote(lote, batch_id: int) -> None:
 
     eventos = spark.read.json(spark.sparkContext.parallelize(brutos))
 
+    # Instrumentação: timestamps de evento e de ingestão
+    agora = F.current_timestamp()
+    evento_em = F.to_timestamp(F.col("source.ts_ms") / 1000)
+
     # Uma linha por pedido por lote: o último evento (maior LSN) vence.
-    # A ordenação usa `_lsn` porque, depois do select, `source` deixou de existir.
     janela = F.row_number().over(
         Window.partitionBy("pedido_id").orderBy(F.col("_lsn").desc())
     )
 
+    colunas_tecnicas = [
+        F.col("op").alias("_op"),
+        F.col("source.lsn").alias("_lsn"),
+        evento_em.alias("_evento_em"),
+        agora.alias("_ingerido_em"),
+    ]
+
     upserts = (
         eventos.where(F.col("op").isin("c", "u", "r"))
-        .select("after.*", F.col("op").alias("_op"), F.col("source.lsn").alias("_lsn"))
+        .select("after.*", *colunas_tecnicas)
         .withColumn("_rn", janela)
         .where(F.col("_rn") == 1)
         .drop("_rn")
@@ -76,7 +144,7 @@ def aplicar_lote(lote, batch_id: int) -> None:
 
     deletes = (
         eventos.where(F.col("op") == "d")
-        .select("before.*", F.col("op").alias("_op"), F.col("source.lsn").alias("_lsn"))
+        .select("before.*", *colunas_tecnicas)
         .withColumn("_rn", janela)
         .where(F.col("_rn") == 1)
         .drop("_rn")
@@ -91,9 +159,14 @@ def aplicar_lote(lote, batch_id: int) -> None:
         staged.write.format("delta").mode("overwrite").option("mergeSchema", "true").save(
             DELTA_PATH
         )
+        # Emite COMPLETE após criar a tabela
+        _emit_complete(spark, job_name="spark_job")
         return
 
     print(f"[batch] aplicando MERGE ({staged.count()} linhas)")
+
+    # --- Emissão COMPLETE após o merge ---
+    _emit_complete(spark, job_name="spark_job")
 
     spark.sql(montar_merge(DELTA_PATH))
 
