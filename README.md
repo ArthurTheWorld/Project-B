@@ -296,15 +296,30 @@ ainda não resolve.
 
 ## Estado atual e roadmap
 
-**Funcionando (validado estaticamente):** captura CDC com deletes, merge
-idempotente testado por replay, evolução de schema sem downtime, monitor de
-latência/vazão e CI.
+**Validado end-to-end em 2026-11-02 (máquina local, Docker Desktop, 5 containers):**
 
-> **Ressalva honesta:** o Docker Desktop esteve parado durante a maior parte do
-> desenvolvimento recente. Os testes de contrato, o `compileall` e o
-> `docker compose config` passam, mas **a execução end-to-end contra
-> Kafka/Spark/Postgres não foi provada** nesta rodada. Suba a stack com
-> `.\scripts\start.ps1` e siga a seção de verificação para confirmar.
+| Propriedade | Resultado medido | Como foi medido |
+|---|---|---|
+| **Insert + update pareados** | origem **31.881** = Delta **31.881** | gerador parado + 60 s de drenagem ([`scripts/medicao-pareada.ps1`](scripts/medicao-pareada.ps1), evidência em [`tmp_medicao.log`](tmp_medicao.log)) |
+| **Deletes** | origem **33.962** = Delta **33.962**; diferença de conjuntos de `pedido_id` nas duas direções = **0** | gerador parado + 90 s de drenagem; export de IDs do Delta ([`sql/ids_delta.sql`](sql/ids_delta.sql)) vs. Postgres, comparados como conjuntos |
+| **Deletes chegam ao job** | `[batch 2014] deletes=3 deletes_com_pk=3`, entre outros 10 batches com `deletes>0` | instrumentação no `aplicar_lote` de [`spark/job.py`](spark/job.py) |
+| **Erro de MERGE com múltiplas linhas** | corrigido — dedupe por `row_number()` sobre `_lsn` antes do `MERGE` | sem exceções no log do Spark após a correção |
+
+Os três bugs reais encontrados e corrigidos nesta rodada:
+
+1. `spark/job.py` lia a coluna `raw` do DataFrame do Kafka — o JSON do Debezium está em `value`.
+2. `generator/carga.py:84` usava `STATUS[:-1]`, que excluía `cancelado`; como o `DELETE` só apaga `cancelado`, nenhum evento `d` era gerado.
+3. `MERGE` quebrava com `DELTA_MULTIPLE_SOURCE_ROW_MATCHING_TARGET_ROW_IN_MERGE` quando o mesmo `pedido_id` aparecia como `c`, `u` e `d` no mesmo microbatch — resolvido deduplicando antes do `MERGE`.
+
+> **Nota de método:** `_op='d'` nunca aparece na tabela Delta — o `MERGE`
+> **apaga** a linha em vez de gravá-la. Medir `count(_op='d')` para provar que o
+> delete funciona é um erro; o teste correto é comparar conjuntos de chaves.
+
+**Ainda não provado nesta rodada** (a ressalva antiga vale para estes itens):
+replay/idempotência ([`scripts/demo-replay.ps1`](scripts/demo-replay.ps1)),
+evolução de schema ([`scripts/demo-evolucao.ps1`](scripts/demo-evolucao.ps1)),
+latência p50/p95 e vazão em ev/s. Os scripts existem e devem ser rodados para
+produzir os números.
 
 **Projeto B (entregue):** SLOs declarados em [`project-b/slo_catalog.yaml`](project-b/slo_catalog.yaml),
 suítes de expectations em Python puro para `loja.pedidos` e
