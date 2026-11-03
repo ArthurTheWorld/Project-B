@@ -304,6 +304,9 @@ ainda não resolve.
 | **Deletes** | origem **33.962** = Delta **33.962**; diferença de conjuntos de `pedido_id` nas duas direções = **0** | gerador parado + 90 s de drenagem; export de IDs do Delta ([`sql/ids_delta.sql`](sql/ids_delta.sql)) vs. Postgres, comparados como conjuntos |
 | **Deletes chegam ao job** | `[batch 2014] deletes=3 deletes_com_pk=3`, entre outros 10 batches com `deletes>0` | instrumentação no `aplicar_lote` de [`spark/job.py`](spark/job.py) |
 | **Erro de MERGE com múltiplas linhas** | corrigido — dedupe por `row_number()` sobre `_lsn` antes do `MERGE` | sem exceções no log do Spark após a correção |
+| **Replay / idempotência** | **53.142 eventos** relidos desde o início do tópico → mesmo conjunto de **33.962** chaves; `so_no_delta=0`, `so_no_pg=0` | checkpoint apagado + `docker compose up -d --force-recreate spark`; confirmado `StartedAt` novo e `[batch 0] eventos=53142` no log |
+| **Evolução de schema** | coluna `cupom` apareceu no Delta **sem restart** — `total=34020, com_cupom=4858 (14,28%)`, igual à origem | `alter table ... add column cupom` no Postgres ([`sql/evolucao.sql`](sql/evolucao.sql)) |
+| **Vazão** | **~145 eventos/min ≈ 2,4 ev/s** com o gerador ativo | [`sql/vazao.sql`](sql/vazao.sql) na janela recente; teto do gerador é 2,5 ev/s (`INTERVALO_MS=400`) |
 
 Os três bugs reais encontrados e corrigidos nesta rodada:
 
@@ -315,11 +318,33 @@ Os três bugs reais encontrados e corrigidos nesta rodada:
 > **apaga** a linha em vez de gravá-la. Medir `count(_op='d')` para provar que o
 > delete funciona é um erro; o teste correto é comparar conjuntos de chaves.
 
-**Ainda não provado nesta rodada** (a ressalva antiga vale para estes itens):
-replay/idempotência ([`scripts/demo-replay.ps1`](scripts/demo-replay.ps1)),
-evolução de schema ([`scripts/demo-evolucao.ps1`](scripts/demo-evolucao.ps1)),
-latência p50/p95 e vazão em ev/s. Os scripts existem e devem ser rodados para
-produzir os números.
+**Latência: não medida — e a razão é técnica, não preguiça.**
+
+A consulta em [`sql/latencia.sql`](sql/latencia.sql) devolveu p50 absurdo
+(~86.000 s). Investigando os valores crus:
+
+```
+_evento_em                 _ingerido_em               _op
+2026-11-03 01:39:09.155    2026-11-03 01:39:10.887    c
+```
+
+A diferença real é **1,7 s**; a conta do Spark devolve ~86.400 s a mais, ou seja
+**exatamente 24 h** de deslocamento entre `timestamp` e `timestamp_ntz` na
+leitura do Delta. Duas limitações reais, ambas de instrumentação:
+
+1. **`_ingerido_em` tem grão de lote, não de evento** — é `current_timestamp()`
+   dentro do `foreachBatch` (trigger de 10 s). Todas as linhas do mesmo lote
+   compartilham o mesmo valor, então o que se mede é "quanto tempo até o lote
+   que continha este evento ser gravado", não a latência do evento.
+2. **A conversão de epoch tem deslocamento de 24 h** — impede até essa medida
+   grosseira de sair correta.
+
+Corrigir exige gravar `_ingerido_em` como epoch em `long` no
+[`spark/job.py`](spark/job.py) e reprocessar o Delta. Fica como item aberto; é
+mais honesto do que publicar um número errado.
+
+**Ainda não provado:** latência p50/p95 (ver acima) e as metas de escala do
+plano (5.000 ev/s, p95 ≤ 2 s) — o gerador local tem teto de 2,5 ev/s.
 
 **Projeto B (entregue):** SLOs declarados em [`project-b/slo_catalog.yaml`](project-b/slo_catalog.yaml),
 suítes de expectations em Python puro para `loja.pedidos` e
