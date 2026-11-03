@@ -81,7 +81,7 @@ def atualizar(conn, rnd: random.Random) -> None:
                   order by random() limit 1
              )
             """,
-            (rnd.choice(STATUS[:-1]),),
+            (rnd.choice(STATUS),),
         )
     conn.commit()
 

@@ -25,10 +25,19 @@ STARTING_OFFSETS = os.getenv("STARTING_OFFSETS", "earliest")
 
 
 def aplicar_lote(lote, batch_id: int) -> None:
-    """Recebe o batch (DataFrame com a coluna `raw`) e aplica no Delta."""
+    """Recebe o batch (DataFrame do Kafka, com a coluna `value`) e aplica no Delta.
+
+    O Debezium publica o evento como JSON no `value` do registro Kafka.
+    A coluna `value` chega como binario; decodificamos para string antes de
+    parsear com spark.read.json.
+    """
     spark = lote.sparkSession
 
-    brutos = [linha["raw"] for linha in lote.select("raw").collect() if linha["raw"]]
+    brutos = [
+        linha["value"].decode("utf-8") if isinstance(linha["value"], (bytes, bytearray)) else linha["value"]
+        for linha in lote.select("value").collect()
+        if linha["value"]
+    ]
     if not brutos:
         return
 
@@ -38,11 +47,6 @@ def aplicar_lote(lote, batch_id: int) -> None:
     agora = F.current_timestamp()
     evento_em = F.to_timestamp(F.col("source.ts_ms") / 1000)
 
-    # Uma linha por pedido por lote: o ultimo evento (maior LSN) vence.
-    janela = F.row_number().over(
-        Window.partitionBy("pedido_id").orderBy(F.col("_lsn").desc())
-    )
-
     colunas_tecnicas = [
         F.col("op").alias("_op"),
         F.col("source.lsn").alias("_lsn"),
@@ -50,23 +54,39 @@ def aplicar_lote(lote, batch_id: int) -> None:
         agora.alias("_ingerido_em"),
     ]
 
-    upserts = (
-        eventos.where(F.col("op").isin("c", "u", "r"))
-        .select("after.*", *colunas_tecnicas)
-        .withColumn("_rn", janela)
+    # Normaliza c/u/r (usa `after`) e d (usa `before`) num unico shape, mantendo
+    # o LSN para ordenar. O MERGE exige NO MAXIMO UMA linha de origem por chave:
+    # o mesmo pedido pode ter c, u e d dentro do mesmo microbatch de 10s.
+    upserts = eventos.where(F.col("op").isin("c", "u", "r")).select(
+        "after.*", *colunas_tecnicas
+    )
+    deletes = eventos.where(F.col("op") == "d").select(
+        "before.*", *colunas_tecnicas
+    )
+
+    # Instrumentacao de diagnostico: separa "delete nao chega do Kafka" de
+    # "delete chega e e descartado aqui". Remover quando o caminho estiver provado.
+    n_eventos = eventos.count()
+    n_upserts = upserts.count()
+    n_deletes = deletes.count()
+    n_deletes_com_pk = deletes.where(F.col("pedido_id").isNotNull()).count()
+    print(
+        f"[batch {batch_id}] eventos={n_eventos} upserts={n_upserts} "
+        f"deletes={n_deletes} deletes_com_pk={n_deletes_com_pk}",
+        flush=True,
+    )
+
+    todos = upserts.unionByName(deletes, allowMissingColumns=True)
+
+    # Uma linha por pedido por lote: o ultimo evento (maior LSN) vence.
+    # Ordenar por _lsn desc garante que o estado final do pedido seja o aplicado.
+    janela = Window.partitionBy("pedido_id").orderBy(F.col("_lsn").desc())
+    staged = (
+        todos.withColumn("_rn", F.row_number().over(janela))
         .where(F.col("_rn") == 1)
         .drop("_rn")
     )
 
-    deletes = (
-        eventos.where(F.col("op") == "d")
-        .select("before.*", *colunas_tecnicas)
-        .withColumn("_rn", janela)
-        .where(F.col("_rn") == 1)
-        .drop("_rn")
-    )
-
-    staged = upserts.unionByName(deletes, allowMissingColumns=True)
     staged.createOrReplaceTempView("staged")
 
     # A escrita acontece ANTES de qualquer marcacao de conclusao.
